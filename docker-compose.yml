@@ -1,0 +1,263 @@
+name: citibike-lakehouse
+
+services:
+  minio1:
+    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+    container_name: citibike-minio-1
+    command: server http://minio1/data http://minio2/data http://minio3/data http://minio4/data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio-data1:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio2:
+    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+    container_name: citibike-minio-2
+    command: server http://minio1/data http://minio2/data http://minio3/data http://minio4/data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio-data2:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio3:
+    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+    container_name: citibike-minio-3
+    command: server http://minio1/data http://minio2/data http://minio3/data http://minio4/data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio-data3:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio4:
+    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+    container_name: citibike-minio-4
+    command: server http://minio1/data http://minio2/data http://minio3/data http://minio4/data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio-data4:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: nginx:1.25-alpine
+    container_name: citibike-minio-lb
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      minio1:
+        condition: service_healthy
+      minio2:
+        condition: service_healthy
+      minio3:
+        condition: service_healthy
+      minio4:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio-client:
+    image: minio/mc:RELEASE.2024-06-12T14-34-03Z
+    container_name: citibike-minio-client
+    profiles: ["tools"]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/opt/project/scripts/init_minio.sh"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-lakehouse}
+    volumes:
+      - ./:/opt/project
+
+  spark-master:
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
+    image: citibike-lakehouse-spark:latest
+    container_name: citibike-spark-master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master --host spark-master
+    ports:
+      - "${SPARK_MASTER_WEB_PORT:-8080}:8080"
+      - "7077:7077"
+    volumes:
+      - ./:/opt/project
+      - ./config/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+
+  spark-worker-1:
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
+    image: citibike-lakehouse-spark:latest
+    container_name: citibike-spark-worker-1
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_WORKER_MEMORY: "2g"
+      SPARK_WORKER_CORES: "1"
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    ports:
+      - "${SPARK_WORKER_WEB_PORT:-8081}:8081"
+    volumes:
+      - ./:/opt/project
+      - ./config/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+
+  spark-worker-2:
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
+    image: citibike-lakehouse-spark:latest
+    container_name: citibike-spark-worker-2
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_WORKER_MEMORY: "2g"
+      SPARK_WORKER_CORES: "1"
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    ports:
+      - "8082:8081"
+    volumes:
+      - ./:/opt/project
+      - ./config/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+
+  spark-driver:
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
+    image: citibike-lakehouse-spark:latest
+    container_name: citibike-spark-driver
+    depends_on:
+      - spark-master
+      - spark-worker-1
+      - spark-worker-2
+      - minio
+    env_file:
+      - .env
+    environment:
+      PYTHONPATH: /opt/project
+    volumes:
+      - ./:/opt/project
+      - ./config/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    command: sleep infinity
+
+  jupyter:
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
+    image: citibike-lakehouse-spark:latest
+    container_name: citibike-jupyter
+    depends_on:
+      - spark-master
+      - minio
+    env_file:
+      - .env
+    environment:
+      PYTHONPATH: /opt/project
+    ports:
+      - "${JUPYTER_PORT:-8888}:8888"
+    volumes:
+      - ./:/opt/project
+      - ./config/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    command: >
+      bash -lc "jupyter lab --ip=0.0.0.0 --port=8888 --no-browser
+      --allow-root --ServerApp.token=${JUPYTER_TOKEN:-lakehouse}
+      --notebook-dir=/opt/project"
+
+  trino:
+    image: trinodb/trino:449
+    container_name: citibike-trino
+    profiles: ["analytics"]
+    depends_on:
+      - minio
+    ports:
+      - "${TRINO_PORT:-8085}:8080"
+    volumes:
+      - ./config/trino/etc/config.properties:/etc/trino/config.properties:ro
+      - ./config/trino/etc/jvm.config:/etc/trino/jvm.config:ro
+      - ./config/trino/etc/node.properties:/etc/trino/node.properties:ro
+      - ./config/trino/etc/log.properties:/etc/trino/log.properties:ro
+      - ./config/trino/catalog:/etc/trino/catalog:ro
+
+  superset-db:
+    image: postgres:15-alpine
+    container_name: citibike-superset-db
+    profiles: ["analytics"]
+    environment:
+      POSTGRES_DB: superset
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD: superset
+    volumes:
+      - superset-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U superset"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  superset:
+    build:
+      context: .
+      dockerfile: docker/superset/Dockerfile
+    image: citibike-lakehouse-superset:latest
+    container_name: citibike-superset
+    profiles: ["analytics"]
+    depends_on:
+      superset-db:
+        condition: service_healthy
+      trino:
+        condition: service_started
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-change-this-local-secret}
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER:-admin}
+      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD:-admin}
+      SUPERSET_ADMIN_EMAIL: ${SUPERSET_ADMIN_EMAIL:-admin@example.com}
+    ports:
+      - "${SUPERSET_PORT:-8088}:8088"
+    volumes:
+      - ./config/superset:/app/pythonpath:ro
+      - superset-home:/app/superset_home
+    command: >
+      /bin/bash -c "superset db upgrade &&
+      superset fab create-admin --username ${SUPERSET_ADMIN_USER:-admin}
+      --firstname Lake --lastname House --email ${SUPERSET_ADMIN_EMAIL:-admin@example.com}
+      --password ${SUPERSET_ADMIN_PASSWORD:-admin} || true &&
+      superset init &&
+      superset run -h 0.0.0.0 -p 8088"
+
+volumes:
+  minio-data1:
+  minio-data2:
+  minio-data3:
+  minio-data4:
+  superset-db-data:
+  superset-home:

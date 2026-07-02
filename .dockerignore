@@ -1,0 +1,14 @@
+.git
+.env
+.venv
+data
+logs
+tmp
+checkpoints
+warehouse
+__pycache__
+.pytest_cache
+*.pyc
+*.zip
+*.csv
+*.parquet
